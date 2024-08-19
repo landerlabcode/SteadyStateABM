@@ -1,0 +1,412 @@
+using Random, Plots, StatsBase, SpecialFunctions, Distances
+
+#Function for computing the steady state concentration of a diffusible inhibitor, in 2D space, with a decay length λ at a distance r away from the center of the source disk
+function conc(λ, r)
+@fastmath    (1/(2*λ))*besseli(1,(1/(2*λ)))*besselk(0, (r/λ))
+end
+
+#returns a list of all differentiated cells in a nxn square grid surrounding the point (x, y)
+function localgrad(A,x,y,n)
+    z = [];
+    for i in (x-n):(x+n)
+        for j in (y-n):(y+n)
+@views      if A[i,j] == 2.0
+@views         push!(z, sqrt((x-i)^2 + (y-j)^2))
+            end
+        end
+    end
+    return z
+end
+
+# a function which returns the index of all elements in an array for which the input function f returns true
+function findall3(f, a::Array{T, N}) where {T, N}
+    j = 1
+    b = Vector{Int}(undef, length(a))
+    @inbounds for i in eachindex(a)
+        @inbounds if f(a[i])
+            b[j] = i
+            j += 1
+        end
+    end
+    resize!(b, j-1)
+    sizehint!(b, length(b))
+    return shuffle!(b)
+end
+
+#A function for shifting a contiguos number (col) of elements columnwise, a single space in distance, in such a way as to fill an empty coordinate location (finish)
+function shiftcol(A,col, finish)
+    if col < 0
+        for i in 1:(abs(col))
+            A[finish[1], finish[2]-i+1] = A[finish[1], finish[2]-i]
+        end
+    elseif col > 0
+        for i in 1:(col)
+            A[finish[1], finish[2]+i-1] = A[finish[1], finish[2]+i]
+        end
+    end
+end
+#A function for shifting a contiguos number (row) of elements row-wise, a single space in distance, in such a way as to fill an empty coordinate location (finish)
+function shiftrow(A, row, finish)
+    if row < 0
+        for i in 1:(abs(row))
+            A[finish[1]-i+1, finish[2]] = A[finish[1]-i, finish[2]]
+        end
+    elseif row > 0
+        for i in 1:(row)
+            A[finish[1]+i-1, finish[2]] = A[finish[1]+i, finish[2]]
+        end
+    end
+end
+
+#A function which, given a starting coordinate (start) and final coordinate (finish) location, shoves a contigous line of elements one coordinate distance columnwise then row wise (or vice versa) such that the starting location is now unoccupied and the final location is occupied with a cell
+function shove(A, start, finish)
+    row = start[1] - finish[1]
+    col = start[2] - finish[2]
+    if row == 0 && col == 0
+        return
+    elseif col == 0
+        shiftrow(A, row, finish)
+    elseif row == 0
+        shiftcol(A, col, finish)
+    end
+    if row != 0 && col !=0
+        if rand() > 0.5
+            shiftcol(A, col, finish)
+            shiftrow(A, row, [finish[1], start[2]])
+        else
+            shiftrow(A, row, finish)
+            shiftcol(A, col, [start[1], finish[2]])
+        end
+    end
+    A[start[1], start[2]] = 0.0
+end
+
+#Attempts to find the nearest unoccupied space around the coordinate (x, y) in a grid of size NxN it uses euclidean distance and searches in expanding square shells
+function findspace(A, x, y, N)
+    r = 1000;
+    loc = [0, 0]
+    limx = abs(x - N÷2);
+    limy = abs(y - N÷2);
+    loc = Array{Int64}[]
+    tik = 0;
+    for i in 1:(abs( maximum([limx,limy]) - N÷2 ) - 1 )
+        t = r;
+        tik = tik + 1;
+        for j in 0:(2*i)
+@views     if A[x+i-j, y+i] == 0.0
+                if euclidean([x,y], [x+i-j, y+i]) < r
+                    r = euclidean([x,y], [x+i-j, y+i])
+                    loc = []
+                    push!(loc, [x+i-j, y+i])
+                    tik = 0;
+                elseif euclidean([x,y], [x+i-j, y+i]) == r
+                    push!(loc, [x+i-j, y+i])
+                end
+            end
+@views      if A[x+i, y+i-j] == 0.0
+                if euclidean([x,y], [x+i, y+i-j]) < r
+                    r = euclidean([x,y], [x+i, y+i-j])
+                    loc = []
+                    push!(loc ,[x+i, y+i-j])
+                    tik = 0;
+                elseif euclidean([x,y], [x+i, y+i-j]) == r
+                    push!(loc ,[x+i, y+i-j])
+                end
+            end
+@views      if A[x-i, y-i+j] == 0.0
+                if euclidean([x,y], [x-i, y-i+j]) < r
+                    r = euclidean([x,y], [x-i, y-i+j])
+                    loc = []
+                    push!(loc, [x-i, y-i+j])
+                    tik = 0;
+                elseif euclidean([x,y], [x-i, y-i+j]) == r
+                    push!(loc, [x-i, y-i+j])
+                end
+            end
+@views      if A[x-i+j, y-i] == 0.0
+                if euclidean([x,y], [x-i+j, y-i]) < r
+                    r = euclidean([x,y], [x-i+j, y-i])
+                    loc = []
+                    push!(loc, [x-i+j, y-i])
+                    tik = 0;
+                elseif euclidean([x,y], [x-i+j, y-i]) == r
+                    push!(loc, [x-i+j, y-i])
+                end
+            end
+        end
+        if r < 1000 && r == t && tik > 10
+            return shuffle!(loc)[1]
+        end
+    end
+    return shuffle!(loc)[1]
+end
+
+#attempts to find the furthest cell from an unoccupied location (x, y) in the NxN matrix A
+function findspace2(A, x, y, N)
+    r = 0;
+    limx = abs(x - N÷2);
+    limy = abs(y - N÷2);
+    loc = Array{Int64}[]
+    tik = 0;
+    for i in 1:(abs( maximum([limx,limy]) - N÷2 ) - 1 )
+        t = r;
+        tik = tik + 1;
+        for j in 0:(2*i)
+@views     if A[x+i-j, y+i] > 0.0
+                if euclidean([x,y], [x+i-j, y+i]) > r
+                    r = euclidean([x,y], [x+i-j, y+i])
+                    loc = Array{Int64}[]
+                    push!(loc, [x+i-j, y+i])
+                    tik = 0;
+                elseif euclidean([x,y], [x+i-j, y+i]) == r
+                    push!(loc, [x+i-j, y+i])
+                    tik = 0;
+                end
+            end
+@views      if A[x+i, y+i-j] > 0.0
+                if euclidean([x,y], [x+i, y+i-j]) > r
+                    r = euclidean([x,y], [x+i, y+i-j])
+                    loc = Array{Int64}[]
+                    push!(loc ,[x+i, y+i-j])
+                    tik = 0;
+                elseif euclidean([x,y], [x+i, y+i-j]) == r
+                    push!(loc ,[x+i, y+i-j])
+                    tik = 0;
+                end
+            end
+@views      if A[x-i, y-i+j] > 0.0
+                if euclidean([x,y], [x-i, y-i+j]) > r
+                    r = euclidean([x,y], [x-i, y-i+j])
+                    loc = Array{Int64}[]
+                    push!(loc, [x-i, y-i+j])
+                    tik = 0;
+                elseif euclidean([x,y], [x-i, y-i+j]) == r
+                    push!(loc, [x-i, y-i+j])
+                    tik = 0;
+                end
+            end
+@views      if A[x-i+j, y-i] > 0.0
+                if euclidean([x,y], [x-i+j, y-i]) > r
+                    r = euclidean([x,y], [x-i+j, y-i])
+                    loc = Array{Int64}[]
+                    push!(loc, [x-i+j, y-i])
+                    tik = 0;
+                elseif euclidean([x,y], [x-i+j, y-i]) == r
+                    push!(loc, [x-i+j, y-i])
+                    tik = 0;
+                end
+            end
+        end
+        if r > 0 && r == t && tik > 1
+            return shuffle!(loc)[1]
+        end
+    end
+    return shuffle!(loc)[1]
+end
+
+#given a cell at loc compute the renewal probability, and given then probability choose the fates of two daughter cells.
+#place one daughter cell in a surrounding unoccupied location. If there are none create one by shoving cells.
+function divide(A, loc, pinit, γ, λ, N)
+    concentration = 0.0;
+    dis = Int(ceil(λ))+2;
+    for i in (loc[1]-dis):(loc[1]+dis)
+        for j in (loc[2]-dis):(loc[2]+dis)
+            if A[i,j] == 2.0
+                concentration += conc(λ, sqrt( (loc[1]-i)^2 + (loc[2]-j)^2 ))
+            end
+        end
+    end
+    pren = pinit/(1 + concentration*γ)
+    z = Array{Int64}[];
+    for i in (loc[1]-1):(loc[1]+1)
+        for j in (loc[2]-1):(loc[2]+1)
+            if A[i,j] == 0.0
+                push!(z, [i,j])
+            end
+        end
+    end
+    if length(z) > 0
+        if rand() > pren
+            A[loc[1],loc[2]] = 3.0
+        else
+            A[loc[1],loc[2]] = 1.0
+        end
+        zz = Int64[]
+        for ll in z
+            numneigh = 0;
+            for i in (ll[1]-1):(ll[1]+1)
+                for j in (ll[2]-1):(ll[2]+1)
+                    if A[i,j] == 1.0 || A[i,j] == 2.0 || A[i,j] == 3.0
+                        numneigh += 1
+                    end
+                end
+            end
+            push!(zz, numneigh)
+        end
+        newloc = shuffle!(z)[1]
+        if rand()>pren
+            A[newloc[1],newloc[2]] = 3.0
+        else
+            A[newloc[1],newloc[2]] = 1.0
+        end
+    else
+        if rand() > pren
+            A[loc[1],loc[2]] = 3.0
+        else
+            A[loc[1],loc[2]] = 1.0
+        end
+        empty_space = findspace(A,loc[1],loc[2], N)
+        shove(A, loc, empty_space)
+        if rand() > pren
+            A[loc[1],loc[2]] = 3.0
+        else
+            A[loc[1],loc[2]] = 1.0
+        end
+    end
+end
+
+#initialize and then update the system.
+#Each time step we:
+#1) convert all premature differentiated cells into mature ones
+#2) Loop through all mature differentiated cells and have them turn over
+#3) Loop through all dividing cells and have them divide
+
+#parameters:
+#pinit: the probability of renewal in the absence of feedback (max probability of renewal)
+#γ: the strength of the negative feedback, increasing it will decrease the size of the steady state
+#λ: the decay length, increasing it will increase the distance over which feedback is communicated
+#runtime: the maximum number of time steps
+#N: the dimensions of the grid (NxN)
+#d: the constant probability of death for each mature differentiated cell per cell cycle
+#AA: the initial condition
+function steady_state_simulation(pinit::Float64, γ::Float64, λ::Float64, runtime::Int64,N::Int64, d::Float64, AA)
+    A = deepcopy(AA);
+    tot = 4;
+    Al = []
+    Al2 = []
+    for i in 1:runtime
+        predif = findall3(x-> x==3.0, A)
+        div = findall3(x-> x==1.0, A)
+        dif = findall3(x-> x==2.0, A)
+        tot =  (length(predif) + length(dif) + length(div));
+        push!(Al, [length(div), length(dif) + length(predif)])
+        push!(Al2, deepcopy(A))
+        if length(div) == 0
+           break
+        end
+        if tot > 500000
+            break
+        end
+        for j in predif
+            A[j] = 2.0
+        end
+        dif = findall3(x-> x==2.0, A)
+        for j in dif
+            col = j÷N + 1
+            row = j - (col-1)*N
+            if rand() < d
+                A[j] = 0.0
+                col = j÷N + 1
+                row = j - (col-1)*N
+                newloc = findspace2(A,row,col, N)
+                if newloc != [0,0]
+                    shove(A, newloc, [row,col])
+                end
+            end
+        end
+        div = findall3(x-> x==1.0, A)
+        for j in div
+            if rand() > 0.2
+                col = j÷N + 1
+                row = j - (col-1)*N
+                divide(A, [row,col], pinit, γ, λ, N)
+            end
+        end
+    end
+    div = findall3(x-> x>=1.0, A)
+    return [Al, Al2]
+end
+
+#initialize with a 7x7 grid of random cell types
+function random_initialization(pinit::Float64, γ::Float64, λ::Float64, runtime::Int64,N::Int64, d::Float64)
+    A = zeros(N,N);
+    for i in 1:7
+        for j in 1:7
+               A[N÷2 - 4 + i, N÷2 - 4 + j] = round(1.0+rand())
+        end
+    end
+    tot = 4;
+    Al = []
+    for i in 1:runtime
+        predif = findall3(x-> x==3.0, A)
+        div = findall3(x-> x==1.0, A)
+        dif = findall3(x-> x==2.0, A)
+        tot =  (length(predif) + length(dif) + length(div));
+        if length(div) == 0
+           return [0, A]
+        end
+        if tot > 25000
+            break
+        end
+        for j in predif
+            A[j] = 2.0
+        end
+        dif = findall3(x-> x==2.0, A)
+        for j in dif
+            col = j÷N + 1
+            row = j - (col-1)*N
+            if rand() < d
+                A[j] = 0.0
+                col = j÷N + 1
+                row = j - (col-1)*N
+                newloc = findspace2(A,row,col, N)
+                if newloc != [0,0]
+                    shove(A, newloc, [row,col])
+                end
+            end
+        end
+        div = findall3(x-> x==1.0, A)
+        for j in div
+            if rand() > 0.2
+                col = j÷N + 1
+                row = j - (col-1)*N
+                divide(A, [row,col], pinit, γ, λ, N)
+            end
+        end
+    end
+    div = findall3(x-> x>=1.0, A)
+    return [length(div), A]
+end
+
+
+# we run 100 simulations with a 7x7 grid of random cell types to find a steady state like configuration
+t = [];
+for i in 1:100
+    d, mat = random_initialization(1.0, 3.8, 1.5,100,1100, 0.25);
+    if 25000 > d > 10
+        push!(t, mat)
+    end
+end
+# choose an initial condition
+initial_condition = t[1];
+
+
+large = [];
+medium = [];
+small = [];
+# output only the numbers of each cell type at each time point
+for i in 1:10
+    d = steady_state_simulation(1.0, 3.8, 1.5,100,1100, 0.25, initial_condition );
+    dd = maximum(sum.(d[1]))
+    if dd > 300000
+        push!(large, d[1])
+    elseif dd > 5000
+        push!(medium, d[1])
+    else
+        push!(small, d[1])
+    end
+end
+
+# to output the entire matrix at each time step
+d = steady_state_simulation(1.0, 3.8, 1.5,100,1100, 0.25, initial_condition );
+d[2]
